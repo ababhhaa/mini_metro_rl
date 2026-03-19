@@ -59,14 +59,12 @@ def load_templates(path="templates.pkl") -> dict:
         return pickle.load(f)
 
 def classify_contour(contour, templates: dict) -> Shape:
-    # Step 1 — matchShapes against all templates
     scores = {
         name: cv2.matchShapes(contour, template, cv2.CONTOURS_MATCH_I1, 0)
         for name, template in templates.items()
     }
     best = min(scores, key=scores.get)
 
-    # Step 2 — refinement for ambiguous pairs
     best = refine(contour, best, scores)
 
     return Shape(best)
@@ -82,26 +80,36 @@ def refine(contour, best: str, scores: dict) -> str:
 
     approx   = cv2.approxPolyDP(contour, 0.04 * cv2.arcLength(contour, True), True)
     vertices = len(approx)
+    print("best pre = ",best)
+    # Star vs cross vs triangle — first, these are unambiguous
+    if best in ('star', 'cross', 'triangle'):
+        if vertices == 3:    return 'triangle'
+        if solidity < 0.62:  return 'star'
+        return 'cross'
 
-    # square vs diamond
-    if best in ('square', 'diamond'):
+    # Wedge — check before pentagon steals it
+    if best == 'wedge':
+        return 'wedge'
+
+    # Oval — check before pentagon steals it
+    if best in ('circle', 'gem'):
+        if solidity > 0.90 and vertices > 5:
+            return 'oval' if aspect > 1.15 else 'circle'
+
+    # Pentagon — only after oval and wedge are excluded
+    if vertices == 5 and solidity > 0.85 and aspect < 1.15 and best not in 'oval':
+        return 'pentagon'
+
+    # Diamond vs square
+    if best in ('square', 'diamond') and vertices == 4:
+        gap = scores['square'] - scores['diamond']
+        if gap > 0.0003:   return 'diamond'
+        if gap < -0.0003:  return 'square'
         return 'diamond' if aspect > 1.2 else 'square'
 
-    # circle vs oval — lower threshold, oval is only slightly elongated
-    if best in ('circle', 'oval'):
-        return 'oval' if aspect > 1.15 else 'circle'
-
-    # star vs cross vs triangle — use solidity + vertices
-    if best in ('star', 'cross', 'triangle'):
-        if vertices == 3:    return 'triangle'   # triangles have exactly 3 vertices
-        if solidity < 0.55:  return 'star'       # very non-convex = star
-        return 'cross'                            # blockier non-convex = cross
-
-    # gem vs diamond vs square
-    if best in ('gem', 'diamond', 'square') and vertices == 4:
-        if aspect < 1.2:  return 'square'
-        if aspect < 1.8:  return 'gem'
-        return 'diamond'
+    # Gem
+    if best in ('gem', 'oval') and aspect > 1.25 and solidity > 0.95:
+        return 'gem'
 
     return best
 
