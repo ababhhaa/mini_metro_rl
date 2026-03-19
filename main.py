@@ -1,8 +1,8 @@
 import mss
 import numpy as np
 import cv2
-
 from enum import Enum
+import pickle
 
 class Shape(Enum):
     CIRCLE = "circle"
@@ -16,6 +16,7 @@ class Shape(Enum):
     DIAMOND = "diamond"
     OVAL = "oval"
     NONE = "none"
+
 
 def capture_screen() -> np.ndarray:
     """Capture the full screen as a BGR numpy array."""
@@ -52,12 +53,61 @@ def mask_ui(frame: np.ndarray) -> np.ndarray:
     frame[0:237, 1824:] = 0 # vert bottom rect
     return frame
 
-def classify_contours(contour) -> Shape:
-    #TODO
-    return Shape.NONE
+
+def load_templates(path="templates.pkl") -> dict:
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+def classify_contour(contour, templates: dict) -> Shape:
+    # Step 1 — matchShapes against all templates
+    scores = {
+        name: cv2.matchShapes(contour, template, cv2.CONTOURS_MATCH_I1, 0)
+        for name, template in templates.items()
+    }
+    best = min(scores, key=scores.get)
+
+    # Step 2 — refinement for ambiguous pairs
+    best = refine(contour, best, scores)
+
+    return Shape(best)
+
+
+def refine(contour, best: str, scores: dict) -> str:
+    x, y, w, h = cv2.boundingRect(contour)
+    aspect = max(w, h) / min(w, h)
+
+    hull_area = cv2.contourArea(cv2.convexHull(contour))
+    area      = cv2.contourArea(contour)
+    solidity  = area / hull_area
+
+    approx   = cv2.approxPolyDP(contour, 0.04 * cv2.arcLength(contour, True), True)
+    vertices = len(approx)
+
+    # square vs diamond
+    if best in ('square', 'diamond'):
+        return 'diamond' if aspect > 1.2 else 'square'
+
+    # circle vs oval — lower threshold, oval is only slightly elongated
+    if best in ('circle', 'oval'):
+        return 'oval' if aspect > 1.15 else 'circle'
+
+    # star vs cross vs triangle — use solidity + vertices
+    if best in ('star', 'cross', 'triangle'):
+        if vertices == 3:    return 'triangle'   # triangles have exactly 3 vertices
+        if solidity < 0.55:  return 'star'       # very non-convex = star
+        return 'cross'                            # blockier non-convex = cross
+
+    # gem vs diamond vs square
+    if best in ('gem', 'diamond', 'square') and vertices == 4:
+        if aspect < 1.2:  return 'square'
+        if aspect < 1.8:  return 'gem'
+        return 'diamond'
+
+    return best
 
 def main():
     frame = capture_screen()
+    frame = mask_ui(frame)
     white_only = isolate_white_shapes(frame)
     gray = cv2.cvtColor(white_only, cv2.COLOR_BGR2GRAY)
     _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
@@ -65,10 +115,30 @@ def main():
 
     debug = frame.copy()  # use the original color frame so you can see context
 
+    stations = [c for i, c in enumerate(contours_list) if hierarchy[0][i][2] != -1]  # has child all outer contours
+    passengers = [c for i, c in enumerate(contours_list) if (hierarchy[0][i][2] == -1 and hierarchy[0][i][3] == -1)]  # has no child and no parent
     # Draw ALL contours
-    cv2.drawContours(debug, contours_list, -1, (139, 255, 50), 2)
-    cv2.imshow("all contours", debug)
+
+    templates = load_templates()
+
+    for i, c in enumerate(stations):
+        shape = classify_contour(c, templates)
+
+        cx, cy, cw, ch = cv2.boundingRect(c)
+        cv2.drawContours(debug, [c], 0, (0, 255, 0), 2)
+        cv2.putText(debug, shape.value+"Station", (cx, cy - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+    for i, c in enumerate(passengers):
+        shape = classify_contour(c, templates)
+
+        cx, cy, cw, ch = cv2.boundingRect(c)
+        cv2.drawContours(debug, [c], 0, (0, 255, 0), 2)
+        cv2.putText(debug, shape.value, (cx, cy - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 255), 1)
+
     cv2.imwrite("contours.png", debug)
+    cv2.imshow("contours", debug)
     cv2.waitKey(0)
 
 if __name__ == "__main__":
